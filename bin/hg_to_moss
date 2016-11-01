@@ -1,0 +1,120 @@
+#!/usr/bin/env ruby
+require 'hg_to_moss'
+require 'net/http'
+require 'openssl'
+require 'cgi'
+require 'trollop'
+require 'nokogiri'
+require 'moss_ruby'
+
+opts = Trollop::options do
+  version "Hypergrade to MOSS, MSJHS 2016"
+  banner <<-EOS
+This program takes a hypergrade exercise and period, and prints a link to the MOSS similarity report. Be sure to set the environment variable SESSCOOKIE to your hypergrade session cookie. This can be found after logging in through a browser's inspector. 
+
+export SESSCOOKIE=cookie
+EOS
+
+  opt :dirname, "The output directory", :type => :string, :default => "mossout"
+  opt :period, "The period index (as seen on the hypergrade user interface), 1-5, as appropriate", :type => :integer
+  opt :ex, "Exercise number (as seen on the hypergrade user interface), 1-whatever, as appropriate", :type => :integer
+  opt :c, "Use C++ mode"
+end
+
+Trollop::die :period, "Must be specified" if opts[:period].nil?
+Trollop::die :ex, "Must be specified" if opts[:ex].nil?
+
+PERIOD_NUMBER = opts[:period] # UI order 
+EXERCISE = opts[:ex] + 1 # Based on order on hypergrade UI
+DIRNAME = opts[:dirname] 
+
+puts EXERCISE
+uri = URI.parse('https://hypergrade.com')
+http = Net::HTTP.new(uri.host, uri.port)
+cookies = CGI::Cookie.new("PHPSESSID", ENV['SESSCOOKIE']).to_s 
+user_to_path = {}
+user_to_file = {}
+people_cheating = []
+
+http.use_ssl = true
+http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+resp = http.get('/grades', { 'Cookie' => cookies } )
+
+grades_doc = Nokogiri::HTML(resp.body)
+classes = grades_doc.css("table.course")
+cells = classes[PERIOD_NUMBER-1].css("tr.student")
+a = true
+
+cells.each do |c|
+  columns = c.css('td')
+  name = columns[0].text
+ 
+  ex_column = columns[EXERCISE+1]
+  approve_path = (ex_column.css('a'))[0]["href"]
+  
+  user_to_path[name] = approve_path
+end
+
+user_to_path.each do |k, v|
+#  break if !a
+  puts "Getting file ID for student " + k
+  resp2 = http.get('/' + v, { 'Cookie' => cookies })
+  usr_doc = Nokogiri::HTML(resp2.body)
+  download_link_element = usr_doc.css("a[download]")
+  if !(download_link_element.nil? or download_link_element.empty? or download_link_element[0].nil?)
+    user_to_file[k] = download_link_element[0]["href"]
+  end
+end
+
+`mkdir -p #{DIRNAME}`
+
+user_to_file.each do |k, v|
+  puts "Creating file for student " + k
+  name_matches = k.match("(.*), (.*)\w*.*")
+  file_name = DIRNAME + "/"  + name_matches[1] + name_matches[2] + ".java"
+  File.open(file_name, 'w') do |f|
+   resp2 = http.get(v, { 'Cookie' => cookies })
+   f.write resp2.body
+  end
+end
+
+moss = MossRuby.new(94321)
+moss.options[:directory_submission] = false
+
+if opts[:c]
+  puts "C++ moss uploader"
+  moss.options[:language] = "c++"
+else
+  puts "Java moss uploader"
+  moss.options[:language] = "java"
+end
+
+to_check = MossRuby.empty_file_hash
+MossRuby.add_file to_check, "#{DIRNAME}/*"
+
+url = moss.check to_check
+
+puts "URL: #{url}"
+
+results = moss.extract_results url
+
+results.each do |m|
+  names = []
+  is_plagiarized = false
+  m.each do |e|
+    names << e[:filename]
+    if e[:pct] > 70
+      is_plagiarized = true
+    end
+  end
+
+  if is_plagiarized
+    names.each do |n|
+      if !(people_cheating.include? n)
+        people_cheating << n
+        puts n
+      end
+    end
+  end
+end
