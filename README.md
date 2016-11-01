@@ -4,7 +4,8 @@ HgToMoss is an executable that allows you to take hypergrade projects and run th
 
 ## Installation
 
-Run
+Run:
+
     $ rake install
 
 ## Contributing
